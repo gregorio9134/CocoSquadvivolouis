@@ -248,6 +248,14 @@ final class ClaudeService {
             state.stateOverride = nil
             return
         }
+
+        // Si existe configuración de agentes de Mochis, despachar a su endpoint modular
+        if loadAgentesConfig() != nil {
+            let targetURL = resolveAgentEndpoint(for: state)
+            await dispatchToMochiAgent(url: targetURL, query: query, context: context, state: state)
+            return
+        }
+
         guard state.chatProvider == .anthropic else {
             await chatOpenAICompatible(query: query, context: context, state: state)
             return
@@ -759,4 +767,179 @@ final class ClaudeService {
             return ["type": "text", "text": "File contents:\n\(text)"]
         }
     }
+
+    // MARK: - Agentes Modulares de Mochis (config_agentes.json)
+
+    func loadAgentesConfig() -> AgentServerConfig? {
+        if let bundleURL = Bundle.main.url(forResource: "config_agentes", withExtension: "json"),
+           let data = try? Data(contentsOf: bundleURL),
+           let decoded = try? JSONDecoder().decode(AgentServerConfig.self, from: data) {
+            return decoded
+        }
+
+        let candidates = [
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("config_agentes.json"),
+            URL(fileURLWithPath: "config_agentes.json"),
+            URL(fileURLWithPath: "../config_agentes.json"),
+            URL(fileURLWithPath: "../../config_agentes.json")
+        ]
+
+        for url in candidates {
+            if let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(AgentServerConfig.self, from: data) {
+                return decoded
+            }
+        }
+
+        return nil
+    }
+
+    func resolveAgentEndpoint(for state: AppState) -> URL {
+        let fallbackURL = URL(string: "http://localhost:8000/api/coco/chat")!
+
+        guard let config = loadAgentesConfig() else {
+            return fallbackURL
+        }
+
+        let activeId = state.focusId ?? "coco_blanco"
+        let agent = config.mochis.first(where: { $0.id == activeId || $0.color == activeId })
+            ?? config.mochis.first(where: { $0.id == "coco_blanco" })
+
+        if let agent = agent {
+            let fullURLString = "\(config.server.base_url)\(agent.endpoint)"
+            return URL(string: fullURLString) ?? fallbackURL
+        }
+
+        let defaultEndpoint = "\(config.server.base_url)\(config.server.chat_endpoint)"
+        return URL(string: defaultEndpoint) ?? fallbackURL
+    }
+
+    func dispatchToMochiAgent(url: URL, query: String, context: PromptContext?, state: AppState) async {
+        state.stateOverride = .thinking
+
+        let placeholder = ChatMessage(role: .assistant, content: "")
+        let msgId = placeholder.id
+        state.chatHistory.append(placeholder)
+
+        var msgs: [[String: Any]] = []
+        for m in state.chatHistory {
+            if !m.content.isEmpty {
+                msgs.append(["role": m.role == .user ? "user" : "assistant", "content": m.content])
+            }
+        }
+        if msgs.isEmpty || msgs.last?["content"] as? String != query {
+            msgs.append(["role": "user", "content": query])
+        }
+
+        var payload: [String: Any] = [
+            "message": query,
+            "query": query,
+            "prompt": query,
+            "messages": msgs,
+            "mochi": state.focusId ?? "coco_blanco"
+        ]
+
+        if let context = context {
+            switch context {
+            case .window(let app, let title, let url):
+                payload["context"] = ["type": "window", "app": app, "title": title, "url": url ?? ""]
+            case .file(let name, _):
+                payload["context"] = ["type": "file", "name": name]
+            }
+        }
+
+        var req = URLRequest(url: url, timeoutInterval: 60)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: req)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw NSError(domain: "MochiServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Respuesta de servidor inválida"])
+            }
+
+            guard httpResponse.statusCode == 200 else {
+                throw NSError(domain: "MochiServer", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"])
+            }
+
+            let isSSE = httpResponse.mimeType?.contains("event-stream") == true
+            var accumulated = ""
+
+            if isSSE {
+                for try await line in bytes.lines {
+                    guard let delta = LocalChat.parseSSEDelta(line) else { continue }
+                    accumulated += delta
+                    if state.stateOverride == .thinking && !accumulated.isEmpty {
+                        state.stateOverride = nil
+                    }
+                    if let idx = state.chatHistory.firstIndex(where: { $0.id == msgId }) {
+                        state.chatHistory[idx].content = accumulated
+                    }
+                }
+            } else {
+                for try await byte in bytes {
+                    accumulated.append(Character(UnicodeScalar(byte)))
+                }
+            }
+
+            var replyText = accumulated
+            if !isSSE, let data = accumulated.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let resp = json["response"] as? String {
+                    replyText = resp
+                } else if let resp = json["reply"] as? String {
+                    replyText = resp
+                } else if let resp = json["message"] as? String {
+                    replyText = resp
+                } else if let resp = json["content"] as? String {
+                    replyText = resp
+                } else if let choices = json["choices"] as? [[String: Any]],
+                          let msg = choices.first?["message"] as? [String: Any],
+                          let resp = msg["content"] as? String {
+                    replyText = resp
+                } else if let resp = json["answer"] as? String {
+                    replyText = resp
+                } else if let resp = json["result"] as? String {
+                    replyText = resp
+                }
+            }
+
+            let trimmed = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw NSError(domain: "MochiServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Respuesta vacía del servidor"])
+            }
+
+            if let idx = state.chatHistory.firstIndex(where: { $0.id == msgId }) {
+                state.chatHistory[idx].content = trimmed
+            }
+            state.stateOverride = nil
+            state.view = .prompt
+            NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.happy)
+        } catch {
+            state.chatHistory.removeAll { $0.id == msgId }
+            state.stateOverride = nil
+            await showError(error.localizedDescription, state: state)
+        }
+    }
 }
+
+// MARK: - Mapeo dinámico desde config_agentes.json
+
+struct AgentServerConfig: Codable, Sendable {
+    struct Server: Codable, Sendable {
+        let base_url: String
+        let chat_endpoint: String
+        let timeout_seconds: Int?
+    }
+    struct MochiAgent: Codable, Sendable {
+        let id: String
+        let nombre: String
+        let color: String
+        let rol: String
+        let endpoint: String
+    }
+    let server: Server
+    let mochis: [MochiAgent]
+}
+

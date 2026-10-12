@@ -1,0 +1,13 @@
+{
+  "server": {
+    "base_url": "http://localhost:8000",
+    "chat_endpoint": "/api/coco/chat",
+    "timeout_seconds": 60
+  },
+  "mochis": [
+    { "id": "coco_blanco", "nombre": "Blanco", "color": "blanco", "rol": "asistente_general", "endpoint": "/agente/blanco" },
+    { "id": "coco_verde", "nombre": "Verde", "color": "verde", "rol": "redes_sociales", "endpoint": "/agente/verde" },
+    { "id": "coco_azul", "nombre": "Azul", "color": "azul", "rol": "analista_datos", "endpoint": "/agente/azul" },
+    { "id": "coco_rojo", "nombre": "Rojo", "color": "rojo", "rol": "research_pesado", "endpoint": "/agente/rojo" }
+  ]
+}
