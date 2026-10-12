@@ -26,3 +26,4 @@
 - [x] Inspeccionar y localizar el archivo de Coucou encargado de enviar los mensajes del chat (`ClaudeService.swift`).
 - [x] Conectar ese archivo con `config_agentes.json` para despachar según el Mochi seleccionado.
 - [x] Backend modular levantado en Oracle con los 4 endpoints aislados.
+- [x] Adaptador del cliente de Windows (`windows/src/core/bridge.ts`) conectado en la rama `client/windows`.

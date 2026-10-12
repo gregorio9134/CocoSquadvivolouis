@@ -5,9 +5,33 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import { State, type Settings } from "./state";
 import type { RecapHistory, RecapPrefs } from "../recap/summary";
 import type { SpotifyState } from "./spotify";
+
+// ── Configuración de Agentes Modulares (sincronizado con config_agentes.json) ──
+const AGENTES_CONFIG = {
+  server: {
+    base_url: "http://150.136.59.173:8080",
+    chat_endpoint: "/api/coco/chat",
+    timeout_seconds: 60,
+  },
+  mochis: [
+    { id: "coco_blanco", nombre: "Blanco", color: "blanco", rol: "asistente_general", endpoint: "/agente/blanco" },
+    { id: "coco_verde", nombre: "Verde", color: "verde", rol: "redes_sociales", endpoint: "/agente/verde" },
+    { id: "coco_azul", nombre: "Azul", color: "azul", rol: "analista_datos", endpoint: "/agente/azul" },
+    { id: "coco_rojo", nombre: "Rojo", color: "rojo", rol: "research_pesado", endpoint: "/agente/rojo" },
+  ],
+} as const;
+
+function resolveMochiEndpoint(focusId: string | null): string {
+  const activeId = (focusId ?? "coco_blanco").toLowerCase();
+  const matched =
+    AGENTES_CONFIG.mochis.find(
+      (m) => m.id === activeId || m.color === activeId || activeId.includes(m.color),
+    ) ?? AGENTES_CONFIG.mochis[0]; // Fallback: /agente/blanco
+  return `${AGENTES_CONFIG.server.base_url}${matched.endpoint}`;
+}
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -326,9 +350,55 @@ export const Bridge = {
   phoneLinkPublishPrefs: (outfit: string) => call<void>("phone_link_publish_prefs", { outfit }),
 
   // ── Chat, files, secrets ──────────────────────────────────────────────────
-  /** One chat turn. The API key and any file bytes never leave Rust. */
-  chatSend: (query: string, context: ChatContext | null) =>
-    callOrThrow<{ text: string }>("chat_send", { query, context }),
+  /** Despacha el mensaje al Mochi activo en el servidor modular de Oracle Staging. */
+  chatSend: async (query: string, _context: ChatContext | null): Promise<{ text: string }> => {
+    const targetUrl = resolveMochiEndpoint(State.focusId);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      AGENTES_CONFIG.server.timeout_seconds * 1000,
+    );
+
+    try {
+      const response = await fetch(targetUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: query,
+          chat_id: "windows_mochi",
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Servidor Oracle respondió con HTTP ${response.status}`);
+      }
+
+      const body = (await response.json()) as {
+        reply?: string;
+        response?: string;
+        respuesta?: string;
+        error?: string;
+      };
+
+      const text = (body.reply ?? body.response ?? body.respuesta ?? "").trim();
+      if (!text) {
+        throw new Error(body.error ?? "Respuesta vacía del agente Mochi.");
+      }
+
+      return { text };
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error("Tiempo de espera agotado al conectar con el servidor Oracle.");
+      }
+      if (err instanceof Error) {
+        throw new Error(`No se pudo conectar con el Mochi en Oracle: ${err.message}`);
+      }
+      throw new Error("Error de red al conectar con el servidor Oracle.");
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  },
   chatReset: () => call<void>("chat_reset"),
   /**
    * The models a provider offers, for the picker in the chat view. Rust asks
