@@ -25,4 +25,4 @@
 - [x] Archivo `config_agentes.json` creado en la raíz.
 - [x] Inspeccionar y localizar el archivo de Coucou encargado de enviar los mensajes del chat (`ClaudeService.swift`).
 - [x] Conectar ese archivo con `config_agentes.json` para despachar según el Mochi seleccionado.
-- [ ] Backend modular levantado en Oracle con los 4 endpoints aislados.
+- [x] Backend modular levantado en Oracle con los 4 endpoints aislados.

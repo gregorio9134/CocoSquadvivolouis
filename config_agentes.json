@@ -1,6 +1,6 @@
 {
   "server": {
-    "base_url": "http://localhost:8000",
+    "base_url": "http://150.136.59.173:8080",
     "chat_endpoint": "/api/coco/chat",
     "timeout_seconds": 60
   },
